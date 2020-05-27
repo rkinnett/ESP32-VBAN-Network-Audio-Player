@@ -11,16 +11,16 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiAP.h>
+//#include <WiFiAP.h>
 #include <WiFiUDP.h>
 #include <driver/dac.h>
 #include <driver/i2s.h>
 #include "vban.h"
 #include "esp_err.h"
 
-//#include "my_wifi.h"  // this defines my wifi ssid and password
+#include "my_wifi.h"  // this defines my wifi ssid and password
 // Set these to your desired credentials.
-const char *ssid = "esp32";
+//const char *ssid = "esp32";
 
 WiFiUDP udpIn;
 uint16_t udpInPort = 6981;
@@ -47,7 +47,7 @@ const uint16_t initialSamplesPerPacket  = 256;   // Use 64 for sample rate 11025
 
 i2s_port_t i2s_num = I2S_NUM_0; // i2s port number (Built-in DAC functions are only supported on I2S0 for current ESP32 chip, purportedly)
 i2s_config_t i2s_config;
-
+bool i2s_running = false;
 
 TaskHandle_t outputAudioStreamTaskHandle;
 static void outputAudioStreamTask(void * pvParameters);
@@ -70,13 +70,20 @@ void configure_i2s(int newSampleRate, uint16_t newDmaBufLen){
     .dma_buf_count = 16,
     .dma_buf_len = newDmaBufLen,
     .use_apll = false,
-    .tx_desc_auto_clear = false
+    .tx_desc_auto_clear = true
   };
 
+  if(i2s_running){
+    ESP_ERROR_CHECK( i2s_stop(i2s_num) );
+    ESP_ERROR_CHECK( i2s_driver_uninstall(i2s_num) );
+  }
+  
   ESP_ERROR_CHECK( i2s_driver_install(i2s_num, &i2s_config, 0, NULL)  );   //install and start i2s driver
   ESP_ERROR_CHECK( i2s_set_pin(i2s_num, NULL) );
   ESP_ERROR_CHECK( i2s_set_dac_mode(I2S_DAC_CHANNEL_LEFT_EN)  );  // RIGHT=GPIO25, LEFT=GPIO26
   ESP_ERROR_CHECK( i2s_zero_dma_buffer(i2s_num) );
+
+  i2s_running = true;
 
   Serial.println("done");
 }
@@ -87,8 +94,17 @@ void setup() {
   Serial.begin(500000);
 
   // Setup Wifi:
-  WiFi.softAP(ssid);
-  IPAddress myIP = WiFi.softAPIP();
+  //WiFi.softAP(ssid);
+  //IPAddress myIP = WiFi.softAPIP();
+  
+  WiFi.begin(ssid, password);     //Connect to your WiFi router
+  Serial.println("");
+  while (WiFi.status() != WL_CONNECTED) {  // Wait for connection
+    delay(500);
+    Serial.print(".");
+  }
+  IPAddress myIP = WiFi.localIP();
+  
   Serial.print("AP IP address: ");  
   Serial.print(myIP);
   Serial.print(";  Subnet Mask: ");
@@ -168,9 +184,7 @@ void receiveUdp(){
     }
 
     // If necessary, reconfigre I2S to match VBAN format:
-    if(vbanSampleRate!=i2s_config.sample_rate || vban_rx_sample_count!=i2s_config.dma_buf_len){
-      ESP_ERROR_CHECK( i2s_stop(i2s_num) );
-      ESP_ERROR_CHECK( i2s_driver_uninstall(i2s_num) );
+    if(!i2s_running || vbanSampleRate!=i2s_config.sample_rate || vban_rx_sample_count!=i2s_config.dma_buf_len){
       configure_i2s(vbanSampleRate, vban_rx_sample_count);
     }
 
@@ -204,8 +218,15 @@ void receiveUdp(){
     // If haven't received any data in awhile, then clear the dma buffers.
     // Otherwise i2s will continue to loop through old data.  
     noDataCounter++;
-    if(noDataCounter>=10){
-      i2s_zero_dma_buffer(i2s_num);
+    if(noDataCounter>=50){
+      if(i2s_running){
+        Serial.println("Stopping i2s");
+        ESP_ERROR_CHECK( i2s_stop(i2s_num) );
+        ESP_ERROR_CHECK( i2s_driver_uninstall(i2s_num) );
+        i2s_running = false;
+      }
+      noDataCounter = 0;
     }
+    vTaskDelay(1);
   }
 }
